@@ -110,12 +110,13 @@ def test_performance_conv2d_kernel(
     kernel_width=3,
     pool_size=1,
 ):
-
+    # a performance requirement map (dtype, image_height) ->
+    # [relaxed performance threshold, optimized performance threshold]
     performance_requirements_by_dtype_size = {
-        (np.float32, 224): 4500,
-        (np.float16, 224): 1950,
-        (np.float32, 32): 64,
-        (np.float16, 32): 148,
+        (np.float32, 224): [3640, 4626],
+        (np.float16, 224): [1570, 1018],
+        (np.float32, 32): [112, 112],
+        (np.float16, 32): [86, 86],
     }
 
     X = np.random.rand(batch_size, in_channels, image_height, image_width).astype(dtype)
@@ -142,13 +143,39 @@ def test_performance_conv2d_kernel(
     p99_us_student = bench_func.benchmark_result.nc_latency.get_latency_percentile(99)
     print(f"\n\nExecution Time for student implementation: {p99_us_student} μs")
 
-    if p99_us_student > performance_requirements_by_dtype_size[(dtype, image_height)]:
+    if (
+        p99_us_student
+        > performance_requirements_by_dtype_size[(dtype, image_height)][0]
+    ):
         print(
-            f"Performance requirement not met: need to be under {performance_requirements_by_dtype_size[(dtype, image_height)]} μs"
+            f"Performance requirement not met: need to be under {performance_requirements_by_dtype_size[(dtype, image_height)][0]} μs"
         )
-        return False
+        return False, False
+    elif (
+        p99_us_student
+        > performance_requirements_by_dtype_size[(dtype, image_height)][1]
+    ):
+        print(
+            f"Performance requirement partially met: better to be under {performance_requirements_by_dtype_size[(dtype, image_height)][1]} μs"
+        )
+        return True, False
+    else:
+        return True, True
 
-    return True
+
+def get_performance_score(test_result, total_score):
+    relaxed_result, optimized_result = test_result
+    if optimized_result:
+        print("Performance test passed 😍")
+        return total_score
+    elif relaxed_result:
+        print("Can you make it faster? 🧐")
+        return (
+            total_score * 0.95
+        )  # students get most of the score with meeting the relaxed time constraint
+    else:
+        print("Performance test failed 😢")
+        return 0  # got 0 for performance otherwise
 
 
 # write a function g which when passed a function f, returns a new function that when called with some *args and **kwargs, calls
@@ -244,40 +271,17 @@ if __name__ == "__main__":
 
     print("Comparing performance with reference kernel (no maxpool, float32)...")
     test_result = test_performance_conv2d_kernel(conv2d, pool_size=1, dtype=np.float32)
-    if test_result:
-        performance_score += 17.5
-        print("Performance test passed 😍")
-    else:
-        print("Performance test failed 😢")
+    performance_score += get_performance_score(test_result, 17.5)
 
     if args.profile is not None:
         save_trace(args.profile + "_float32", "file_pool_1_float32_224.neff")
 
     print("Comparing performance with reference kernel (no maxpool, float16)...")
     test_result = test_performance_conv2d_kernel(conv2d, pool_size=1, dtype=np.float16)
-    if test_result:
-        performance_score += 17.5
-        print("Performance test passed 😍")
-    else:
-        print("Performance test failed 😢")
+    performance_score += get_performance_score(test_result, 17.5)
 
     if args.profile is not None:
         save_trace(args.profile + "_float16", "file_pool_1_float16_224.neff")
-
-    print(
-        "Comparing performance with reference kernel (no maxpool, float16, smaller image)... [EC]"
-    )
-    test_result = test_performance_conv2d_kernel(
-        conv2d, pool_size=1, dtype=np.float16, image_height=32, image_width=16
-    )
-    if test_result:
-        ec += 1.25
-        print("Performance test passed 😍")
-    else:
-        print("Performance test failed 😢")
-
-    if args.profile is not None:
-        save_trace(args.profile + "_float16_smaller", "file_pool_1_float16_32.neff")
 
     print(
         "Comparing performance with reference kernel (no maxpool, float32, smaller image)... [EC]"
@@ -285,25 +289,28 @@ if __name__ == "__main__":
     test_result = test_performance_conv2d_kernel(
         conv2d, pool_size=1, dtype=np.float32, image_height=32, image_width=16
     )
-    if test_result:
-        ec += 1.25
-        print("Performance test passed 😍")
-    else:
-        print("Performance test failed 😢")
+    ec += get_performance_score(test_result, 1.25)
 
     if args.profile is not None:
         save_trace(args.profile + "_float32_smaller", "file_pool_1_float32_32.neff")
+
+    print(
+        "Comparing performance with reference kernel (no maxpool, float16, smaller image)... [EC]"
+    )
+    test_result = test_performance_conv2d_kernel(
+        conv2d, pool_size=1, dtype=np.float16, image_height=32, image_width=16
+    )
+    ec += get_performance_score(test_result, 1.25)
+
+    if args.profile is not None:
+        save_trace(args.profile + "_float16_smaller", "file_pool_1_float16_32.neff")
 
     if args.test_maxpool:
         print("Comparing performance with reference kernel (with maxpool, float32)...")
         test_result = test_performance_conv2d_kernel(
             conv2d, pool_size=2, dtype=np.float32
         )
-        if test_result:
-            performance_score += 7.5
-            print("Performance test passed 😍")
-        else:
-            print("Performance test failed 😢")
+        performance_score += get_performance_score(test_result, 7.5)
 
         if args.profile is not None:
             save_trace(args.profile + "_pool_float32", "file_pool_2_float32_224.neff")
@@ -312,11 +319,7 @@ if __name__ == "__main__":
         test_result = test_performance_conv2d_kernel(
             conv2d, pool_size=2, dtype=np.float16
         )
-        if test_result:
-            performance_score += 7.5
-            print("Performance test passed 😍")
-        else:
-            print("Performance test failed 😢")
+        performance_score += get_performance_score(test_result, 7.5)
 
         if args.profile is not None:
             save_trace(args.profile + "_pool_float16", "file_pool_2_float16_224.neff")
@@ -327,11 +330,7 @@ if __name__ == "__main__":
         test_result = test_performance_conv2d_kernel(
             conv2d, pool_size=2, dtype=np.float32, image_height=32, image_width=16
         )
-        if test_result:
-            ec += 1.25
-            print("Performance test passed 😍")
-        else:
-            print("Performance test failed 😢")
+        ec += get_performance_score(test_result, 1.25)
 
         if args.profile is not None:
             save_trace(
@@ -344,11 +343,7 @@ if __name__ == "__main__":
         test_result = test_performance_conv2d_kernel(
             conv2d, pool_size=2, dtype=np.float16, image_height=32, image_width=16
         )
-        if test_result:
-            ec += 1.25
-            print("Performance test passed 😍")
-        else:
-            print("Performance test failed 😢")
+        ec += get_performance_score(test_result, 1.25)
 
         if args.profile is not None:
             save_trace(

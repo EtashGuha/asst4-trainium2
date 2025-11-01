@@ -414,6 +414,8 @@ Recall that the Vector Engine has the capability to operate on SBUF tiles of siz
 Given the constraints of the Tensor Engine, implementing matrix multiplication for arbitrary matrix dimensions on Trainium requires tiling the computation so it is performed as a sequence of matrix multiplications on fixed-size tiles. (This is similar to how vector addition in part 1 was tiled to work for large input vector sizes). The example below, which we modified from the [NKI tutorials](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/nki/tutorials), demonstrates how to implement matrix multiplication using a tiled approach, where the tiles are sized to meet the Trainium Tensor engines tile size constraints. Note: a description of the code is provided after the code listing.
 
 ```
+@nki.compiler.skip_middle_end_transformations
+@nki.jit
 def nki_matmul_tiled_(lhsT, rhs, result):
   """NKI kernel to compute a matrix multiplication operation in a tiled manner"""
 
@@ -638,7 +640,11 @@ It’s possible that your current solution already meets this requirement withou
 
 For the correctness test, we use two types of images. The first type is a small image with dimensions of 32×16. The second type is a large image with dimensions of 224×224, which exceeds the capacity of the SBUF and cannot fit within it.
 
-For the performance test, we evaluate the performance under different configurations: with and without maxpool, and using float16 versus float32 precision. We will compare the performance of your program with the reference solution. You will pass the test if your p99 latency is within 150% of the reference latency.
+For the performance test, we evaluate the performance under different configurations: with and without maxpool, and using float16 versus float32 precision. We will compare the performance of your program with the reference solution.
+
+We have two versions of reference solutions, main and optimized. You will be granted 95% of the performance points if your p99 latency is within 120% of the main reference latency. You will be granted all of the performance points if it is within 120% of our optimized reference latency.
+
+There is only one performance threshold set for the EC part, which is 120% of the reference latency.
 
 **Write Up: 40 Points**
   - Part 1 Questions: 30 Points
