@@ -12,43 +12,40 @@ from conv2d import fused_conv2d_maxpool as conv2d
 from conv2d_numpy import conv2d_cpu_torch
 import logging
 import argparse
-import io
-import sys
 
 import subprocess
 
 logging.disable(logging.OFF)
 
 
-def save_trace(profile_name, neff_file_name):
+def save_trace(profile_name):
     """Run the profiler and save the NEFF and NTFF files with the specified name."""
     subprocess.run(
         [
             "neuron-profile",
             "capture",
             "-n",
-            neff_file_name,
+            profile_name + ".neff",
             "-s",
             profile_name + ".ntff",
         ],
         check=True,
     )
 
-    subprocess.run(["mv", neff_file_name, profile_name + ".neff"], check=True)
-
     print(
-        f"\n\nNEFF / NTFF files generated with names: {profile_name + '.neff'}, {profile_name + '.ntff'}"
+        f"\nNEFF / NTFF files generated with names: {profile_name + '.neff'}, {profile_name + '.ntff'}"
     )
 
 
 def test_correctness_conv2d_kernel(
     kernel,
-    use_cpu_impl=False,
+    simulate=False,
     use_larger_images=False,
     use_bias=False,
     use_maxpool=False,
 ):
-    kernel = baremetal(kernel)
+    if not simulate:
+        kernel = baremetal(kernel)
     ref_impl = conv2d_cpu_torch
 
     input_channels_list = [128, 256]
@@ -88,9 +85,8 @@ def test_correctness_conv2d_kernel(
 
                         if not np.allclose(out, out_ref):
                             print(
-                                f"Output mismatch for input_channels: {input_channels}, \
-                        output_channels: {output_channels}, kernel_size: {kernel_size}, batch_size: {batch_size},\
-                         image_dims: {image_dims}, use_bias: {use_bias}, use_maxpool: {use_maxpool}"
+                                f"Output mismatch for {input_channels=}, {output_channels=}, {kernel_size=}"
+                                f"{batch_size=}, {image_dims=}, {use_bias=}, {use_maxpool=}"
                             )
 
                             return False
@@ -109,12 +105,13 @@ def test_performance_conv2d_kernel(
     kernel_height=3,
     kernel_width=3,
     pool_size=1,
+    profile=None
 ):
     # a performance requirement map (dtype, image_height) ->
     # [relaxed performance threshold, optimized performance threshold]
     performance_requirements_by_dtype_size = {
-        (np.float32, 224): [4964, 4626],
-        (np.float16, 224): [1570, 1018],
+        (np.float32, 224): [4964, 4596],
+        (np.float16, 224): [1365, 1002],
         (np.float32, 32): [112, 112],
         (np.float16, 32): [86, 86],
     }
@@ -128,36 +125,22 @@ def test_performance_conv2d_kernel(
     args = [X, W, bias]
     kwargs = {"pool_size": pool_size}
 
-    dtype_str = "float32" if dtype == np.float32 else "float16"
-
-    bench_func = nki.benchmark(
-        warmup=5,
-        iters=20,
-        save_neff_name=f"file_pool_{pool_size}_{dtype_str}_{image_height}.neff",
-        additional_compile_opt="--disable-dge",
-    )(kernel)
-    text_trap = io.StringIO()
-    sys.stdout = text_trap
+    bench_kwargs = {}
+    if profile:
+        bench_kwargs = {
+            "save_neff_name": profile,
+            "additional_compile_opt": "--disable-dge",
+        }
+    bench_func = nki.benchmark(warmup=5, iters=20, **bench_kwargs)(kernel)
     bench_func(*args, **kwargs)
-    sys.stdout = sys.__stdout__
-    p99_us_student = bench_func.benchmark_result.nc_latency.get_latency_percentile(99)
-    print(f"\n\nExecution Time for student implementation: {p99_us_student} μs")
+    p99_us = bench_func.benchmark_result.nc_latency.get_latency_percentile(99)
+    print(f"\n\nExecution Time for student implementation: {p99_us} μs")
 
-    if (
-        p99_us_student
-        > performance_requirements_by_dtype_size[(dtype, image_height)][0]
-    ):
-        print(
-            f"Performance requirement not met: need to be under {performance_requirements_by_dtype_size[(dtype, image_height)][0]} μs"
-        )
+    if p99_us > (thresh := performance_requirements_by_dtype_size[(dtype, image_height)][0]):
+        print(f"Performance requirement not met: must be under {thresh} μs")
         return False, False
-    elif (
-        p99_us_student
-        > performance_requirements_by_dtype_size[(dtype, image_height)][1]
-    ):
-        print(
-            f"Performance requirement partially met: better to be under {performance_requirements_by_dtype_size[(dtype, image_height)][1]} μs"
-        )
+    elif p99_us > (thresh := performance_requirements_by_dtype_size[(dtype, image_height)][1]):
+        print(f"Performance requirement partially met (90% credit): for full credit, must be under {thresh} μs")
         return True, False
     else:
         return True, True
@@ -170,16 +153,15 @@ def get_performance_score(test_result, total_score):
         return total_score
     elif relaxed_result:
         print("Can you make it faster? 🧐")
-        return (
-            total_score * 0.95
-        )  # students get most of the score with meeting the relaxed time constraint
+        # students get most of the score with meeting the relaxed time constraint
+        return total_score * 0.9
     else:
         print("Performance test failed 😢")
-        return 0  # got 0 for performance otherwise
+        return 0
 
 
-# write a function g which when passed a function f, returns a new function that when called with some *args and **kwargs, calls
-# nki.simulate_kernel(f, *args, **kwargs) and returns the result
+# write a function g which when passed a function f, returns a new function that when called with some *args
+# and **kwargs, calls nki.simulate_kernel(f, *args, **kwargs) and returns the result
 def simulate_kernel_wrapper(kernel):
     def temp_func(*args, **kwargs):
         return nki.simulate_kernel(kernel, *args, **kwargs)
@@ -215,158 +197,107 @@ if __name__ == "__main__":
     correctness_score = 0.0
     performance_score = 0.0
     ec = 0.0
-    # running correctness tests
-    print(
-        "Running correctness test for conv2d kernel with smaller images...",
-        end="",
-        flush=True,
-    )
-    test_result = test_correctness_conv2d_kernel(conv2d, use_larger_images=False)
-    if test_result:
-        correctness_score += 2.5
-        print("Passed 😎")
-    else:
-        print("Failed 😢")
 
-    print(
-        "Running correctness test for conv2d kernel with larger images...",
-        end="",
-        flush=True,
-    )
-    test_result = test_correctness_conv2d_kernel(conv2d, use_larger_images=True)
-    if test_result:
-        correctness_score += 2.5
-        print("Passed 😇")
-    else:
-        print("Failed 😢")
-
-    print(
-        "Running correctness test for conv2d kernel with larger images + bias...",
-        end="",
-        flush=True,
-    )
-    test_result = test_correctness_conv2d_kernel(
-        conv2d, use_bias=True, use_larger_images=True
-    )
-    if test_result:
-        correctness_score += 2.5
-        print("Passed 😍")
-    else:
-        print("Failed 😢")
-
+    # --------- CORRECTNESS TESTS ---------
+    correctness_tests = [
+        {
+            "use_larger_images": False,
+            "use_bias": False,
+            "use_maxpool": False,
+        },
+        {
+            "use_larger_images": True,
+            "use_bias": False,
+            "use_maxpool": False,
+        },
+        {
+            "use_larger_images": True,
+            "use_bias": True,
+            "use_maxpool": False,
+        },
+    ]
     if args.test_maxpool:
-        print(
-            "Running correctness test for conv2d kernel with larger images + bias + maxpool...",
-            end="",
-            flush=True,
-        )
-        test_result = test_correctness_conv2d_kernel(
-            conv2d, use_bias=True, use_maxpool=True, use_larger_images=True
-        )
+        correctness_tests.append({
+            "use_larger_images": True,
+            "use_bias": True,
+            "use_maxpool": True,
+        })
+    
+    for test_case in correctness_tests:
+        print("\nRunning correctness test for conv2d kernel with "
+              f"{'larger' if test_case['use_larger_images'] else 'smaller'} image"
+              f"{' + bias' if test_case['use_bias'] else ''}"
+              f"{' + maxpool' if test_case['use_maxpool'] else ''}"
+              f"{' [simulated]' if args.simulate else ''}...", end=" ", flush=True)
+            
+        test_result = test_correctness_conv2d_kernel(conv2d, simulate=args.simulate, **test_case)
         if test_result:
             correctness_score += 2.5
-            print("Passed 😍")
+            print("Passed 😎")
         else:
             print("Failed 😢")
-
-    print("Comparing performance with reference kernel (no maxpool, float32)...")
-    test_result = test_performance_conv2d_kernel(conv2d, pool_size=1, dtype=np.float32)
-    performance_score += get_performance_score(test_result, 17.5)
-
-    if args.profile is not None:
-        save_trace(args.profile + "_float32", "file_pool_1_float32_224.neff")
-
-    print("Comparing performance with reference kernel (no maxpool, float16)...")
-    test_result = test_performance_conv2d_kernel(conv2d, pool_size=1, dtype=np.float16)
-    performance_score += get_performance_score(test_result, 17.5)
-
-    if args.profile is not None:
-        save_trace(args.profile + "_float16", "file_pool_1_float16_224.neff")
-
-    print(
-        "Comparing performance with reference kernel (no maxpool, float32, smaller image)... [EC]"
-    )
-    test_result = test_performance_conv2d_kernel(
-        conv2d, pool_size=1, dtype=np.float32, image_height=32, image_width=16
-    )
-    ec += get_performance_score(test_result, 1.25)
-
-    if args.profile is not None:
-        save_trace(args.profile + "_float32_smaller", "file_pool_1_float32_32.neff")
-
-    print(
-        "Comparing performance with reference kernel (no maxpool, float16, smaller image)... [EC]"
-    )
-    test_result = test_performance_conv2d_kernel(
-        conv2d, pool_size=1, dtype=np.float16, image_height=32, image_width=16
-    )
-    ec += get_performance_score(test_result, 1.25)
-
-    if args.profile is not None:
-        save_trace(args.profile + "_float16_smaller", "file_pool_1_float16_32.neff")
-
+    
+    # --------- PERFORMANCE TESTS ---------
+    performance_tests = [
+        {
+            "pool_size": 1,
+            "dtype": np.float32,
+        },
+        {
+            "pool_size": 1,
+            "dtype": np.float16,
+        },
+    ]
     if args.test_maxpool:
-        print("Comparing performance with reference kernel (with maxpool, float32)...")
-        test_result = test_performance_conv2d_kernel(
-            conv2d, pool_size=2, dtype=np.float32
-        )
-        performance_score += get_performance_score(test_result, 7.5)
+        performance_tests.extend([{
+            "pool_size": 2,
+            "dtype": np.float32,
+        }, {
+            "pool_size": 2,
+            "dtype": np.float16,
+        }])
+    
+    for test_case in performance_tests:
+        pool_str = "with maxpool" if test_case['pool_size'] == 2 else "no maxpool"
+        dtype_str = "float16" if test_case['dtype'] == np.float16 else "float32"
+        print(f"\nComparing performance with reference kernel ({pool_str}, {dtype_str})...", end=" ", flush=True)
 
+        profile = None
         if args.profile is not None:
-            save_trace(args.profile + "_pool_float32", "file_pool_2_float32_224.neff")
+            profile = f"{args.profile}{'_pool' if test_case['pool_size'] == 2 else ''}_{dtype_str}.neff"
+        
+        test_result = test_performance_conv2d_kernel(conv2d, profile=profile, **test_case)
+        performance_score += get_performance_score(test_result, 17.5 if test_case['pool_size'] == 1 else 7.5)
 
-        print("Comparing performance with reference kernel (with maxpool, float16)...")
-        test_result = test_performance_conv2d_kernel(
-            conv2d, pool_size=2, dtype=np.float16
-        )
-        performance_score += get_performance_score(test_result, 7.5)
+        if profile:
+            save_trace(profile.replace(".neff", ""))
 
+    # --------- EXTRA CREDIT TESTS ---------
+    ec_tests = [test | {"image_height": 32, "image_width": 16} for test in performance_tests]
+    for test_case in ec_tests:
+        pool_str = "with maxpool" if test_case['pool_size'] == 2 else "no maxpool"
+        dtype_str = "float16" if test_case['dtype'] == np.float16 else "float32"
+        print(f"\nComparing performance with reference kernel ({pool_str},"
+              f" {dtype_str}, smaller image)... [EC] ", end=" ", flush=True)
+
+        profile = None
         if args.profile is not None:
-            save_trace(args.profile + "_pool_float16", "file_pool_2_float16_224.neff")
-
-        print(
-            "Comparing performance with reference kernel (with maxpool, float32, smaller image)... [EC]"
-        )
-        test_result = test_performance_conv2d_kernel(
-            conv2d, pool_size=2, dtype=np.float32, image_height=32, image_width=16
-        )
+            profile = f"{args.profile}{'_pool' if test_case['pool_size'] == 2 else ''}_{dtype_str}_smaller.neff"
+        
+        test_result = test_performance_conv2d_kernel(conv2d, profile=profile, **test_case)
         ec += get_performance_score(test_result, 1.25)
 
-        if args.profile is not None:
-            save_trace(
-                args.profile + "_pool_float32_smaller", "file_pool_2_float32_32.neff"
-            )
-
-        print(
-            "Comparing performance with reference kernel (with maxpool, float16, smaller image)... [EC]"
-        )
-        test_result = test_performance_conv2d_kernel(
-            conv2d, pool_size=2, dtype=np.float16, image_height=32, image_width=16
-        )
-        ec += get_performance_score(test_result, 1.25)
-
-        if args.profile is not None:
-            save_trace(
-                args.profile + "_pool_float16_smaller", "file_pool_2_float16_32.neff"
-            )
-
+        if profile:
+            save_trace(profile.replace(".neff", ""))
+    
     print(
-        "Your final score is: ",
-        "" if args.test_maxpool else "(without maxpool) ",
-        correctness_score + performance_score + ec,
-        "\tTotal obtainable: ",
-        65 if args.test_maxpool else 45,
+        f"Your final score is {'' if args.test_maxpool else '(without maxpool)'}: ",
+        f"{correctness_score + performance_score + ec} / {60.0 if args.test_maxpool else 42.5}"
     )
     print(
-        "Correctness: ",
-        correctness_score,
-        "\tTotal obtainable: ",
-        10 if args.test_maxpool else 7.5,
+        f"Correctness: {correctness_score}\tTotal obtainable: {10.0 if args.test_maxpool else 7.5}"
     )
     print(
-        "Performance: ",
-        performance_score,
-        "\tTotal obtainable: ",
-        50 if args.test_maxpool else 35,
+        f"Performance: {performance_score}\tTotal obtainable: {50.0 if args.test_maxpool else 35}"
     )
-    print("Extra Credit:", ec, "\tTotal obtainable: ", 5 if args.test_maxpool else 2.5)
+    print(f"Extra Credit: {ec}\tTotal obtainable: {5.0 if args.test_maxpool else 2.5}")
