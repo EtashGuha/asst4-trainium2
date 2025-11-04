@@ -5,7 +5,7 @@ import neuronxcc.nki as nki
 import neuronxcc.nki.language as nl
 import neuronxcc.nki.isa as nisa
 from neuronxcc.nki import baremetal
-
+from tqdm import tqdm
 
 """
 A fused convolution - maxpool kernel that you need to implement for Part 2.
@@ -68,11 +68,36 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
     c_in_pmax = nl.tile_size.pmax
     n_tiles_c_in = in_channels // c_in_pmax
 
+    H_out = 1 + (input_height - filter_height)
+    W_out = 1 + (input_width - filter_width)
+
     # Process the images in batches
-    for b in nl.affine_range(batch_size):
-        raise RuntimeError("Please fill your implementation of computing convolution"
-                           " of X[b] with the weights W and bias b, followed by a"
-                           " maxpool and store the result in X_out[b]")
+    for b in range(batch_size):
+        for c in range(out_channels):
+            for i in range(H_out):
+                for j in range(W_out):
+                    # Step 1: Allocate tiles
+                    x_tile = nl.ndarray((in_channels, filter_height, filter_width), dtype=X.dtype, buffer=nl.sbuf)
+                    w_tile = nl.ndarray((in_channels, filter_height, filter_width), dtype=W.dtype, buffer=nl.sbuf)
+
+                    # Step 2: Load data
+                    nisa.dma_copy(src=X[b, :, i * pool_size : i * pool_size + filter_height, j * pool_size : j * pool_size + filter_width], dst=x_tile)
+                    nisa.dma_copy(src=W[c], dst=w_tile)
+
+                    out_tile = x_tile * w_tile
+
+                    temp = nisa.tensor_reduce(nl.add, out_tile, axis=(1, 2), keepdims=True)
+
+                    temp_flat = temp[:, 0, 0:1]
+
+                    ones = nl.ones((in_channels, 1), dtype=temp_flat.dtype, buffer=nl.sbuf)
+                    result_psum = nisa.nc_matmul(temp_flat, ones)
+                    result = nl.copy(result_psum, dtype=X.dtype)
+
+                    # Add bias
+                    bias_tile = nl.ndarray((1, 1), dtype=bias.dtype, buffer=nl.sbuf)
+                    nisa.dma_copy(src=bias[c:c+1], dst=bias_tile)
+                    result = nisa.tensor_scalar(result, nl.add, bias_tile)
+                    nisa.dma_copy(src=result, dst=X_out[b, c, i, j])
 
     return X_out
-

@@ -66,7 +66,7 @@ def vector_add_tiled(a_vec, b_vec):
     M = a_vec.shape[0]
     
     # TODO: You should modify this variable for Step 1
-    ROW_CHUNK = 128
+    ROW_CHUNK = 256
 
     # Loop over the total number of chunks, we can use affine_range
     # because there are no loop-carried dependencies
@@ -102,10 +102,12 @@ def vector_add_stream(a_vec, b_vec):
     M = a_vec.shape[0]
 
     # TODO: You should modify this variable for Step 2a
-    FREE_DIM = 2000
+    
 
     # The maximum size of our Partition Dimension
     PARTITION_DIM = 128
+
+    FREE_DIM = 1000
 
     a_vec_re = a_vec.reshape((PARTITION_DIM, M // PARTITION_DIM))
     b_vec_re = b_vec.reshape((PARTITION_DIM, M // PARTITION_DIM))
@@ -146,7 +148,14 @@ def matrix_transpose(a_tensor):
     tile_dim = nl.tile_size.pmax  # this should be 128
 
     assert M % tile_dim == N % tile_dim == 0, "Matrix dimensions not divisible by tile dimension!"
-
-    # TODO: Your implementation here. The only compute instruction you should use is `nisa.nc_transpose`.
+    PARTITION_DIM = 128
+    FREE_DIM = N
+    for m in nl.affine_range(M // (PARTITION_DIM)):
+        for tile_idx in nl.affine_range(FREE_DIM  // 128):
+            a_tile = nl.ndarray((PARTITION_DIM, tile_dim), dtype=a_tensor.dtype, buffer=nl.sbuf)
+            nisa.dma_copy(src=a_tensor[m * PARTITION_DIM : (m + 1) * PARTITION_DIM, tile_idx * 128 : (tile_idx + 1) * 128], dst=a_tile)
+            x = nisa.nc_transpose(a_tile)
+            y = nisa.tensor_copy(x, engine=nisa.vector_engine)
+            nisa.dma_copy(src=y, dst=out[tile_idx * 128 : (tile_idx + 1) * 128, m * PARTITION_DIM : (m + 1) * PARTITION_DIM])
 
     return out
