@@ -184,7 +184,7 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
     for batch_idx in nl.affine_range(batch_size):
         for oc_idx in nl.affine_range(out_channels // PARTITION_SIZE):
             num_spatial_tiles = (out_height * out_width + SPATIAL_PARTITION_SIZE - 1) // SPATIAL_PARTITION_SIZE
-            for spatial_partition_idx in range(num_spatial_tiles):
+            for spatial_partition_idx in nl.affine_range(num_spatial_tiles):
                 spatial_start = spatial_partition_idx * SPATIAL_PARTITION_SIZE
                 spatial_end = min(spatial_start + SPATIAL_PARTITION_SIZE, out_height * out_width)
                 spatial_size = spatial_end - spatial_start
@@ -193,16 +193,17 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                 for ic_idx in range(in_channels // PARTITION_SIZE):
                     for fh in range(filter_height):
                         for fw in range(filter_width):
+                            # Load the entire plane for this filter position
+                            x_plane = nl.ndarray((PARTITION_SIZE, out_height, out_width), dtype=X.dtype, buffer=nl.sbuf)
+                            nisa.dma_copy(src=X[batch_idx, ic_idx * PARTITION_SIZE: (ic_idx + 1) * PARTITION_SIZE, fh:fh + out_height, fw:fw + out_width], dst=x_plane)
+
+                            # Flatten and extract our spatial tile
+                            x_plane_flat = x_plane.reshape((PARTITION_SIZE, out_height * out_width))
                             x_tile = nl.ndarray((PARTITION_SIZE, SPATIAL_PARTITION_SIZE), dtype=X.dtype, buffer=nl.sbuf)
-                            for i in range(SPATIAL_PARTITION_SIZE):
+                            # Copy with fixed loop bound
+                            for i in nl.affine_range(SPATIAL_PARTITION_SIZE):
                                 if i < spatial_size:
-                                    global_i = spatial_start + i
-                                    oh = global_i // out_width
-                                    ow = global_i % out_width
-                                    try:
-                                        nisa.dma_copy(src=X[batch_idx, ic_idx * PARTITION_SIZE: (ic_idx + 1) * PARTITION_SIZE, oh + fh, ow + fw], dst=x_tile[:, i])
-                                    except:
-                                        breakpoint()
+                                    x_tile[:, i] = x_plane_flat[:, spatial_start + i]
                             w_tile = nl.ndarray((PARTITION_SIZE, PARTITION_SIZE), dtype=W.dtype, buffer=nl.sbuf)
 
                             nisa.dma_copy(src=W[oc_idx * PARTITION_SIZE: (oc_idx + 1) * PARTITION_SIZE, ic_idx * PARTITION_SIZE: (ic_idx + 1) * PARTITION_SIZE, fh, fw], dst=w_tile)
@@ -213,11 +214,11 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                 # Add bias
                 bias_tile = nl.ndarray((PARTITION_SIZE, 1), dtype=bias.dtype, buffer=nl.sbuf)
                 nisa.dma_copy(src=bias[oc_idx * PARTITION_SIZE: (oc_idx + 1) * PARTITION_SIZE], dst=bias_tile[:, 0])
-                for i in range(SPATIAL_PARTITION_SIZE):
+                for i in nl.affine_range(SPATIAL_PARTITION_SIZE):
                     if i < spatial_size:
                         output_tile[:, i] = nisa.tensor_tensor(output_tile[:, i], bias_tile[:, 0], nl.add)
                 # Write back each position
-                for i in range(SPATIAL_PARTITION_SIZE):
+                for i in nl.affine_range(SPATIAL_PARTITION_SIZE):
                     if i < spatial_size:
                         global_i = spatial_start + i
                         oh = global_i // out_width
