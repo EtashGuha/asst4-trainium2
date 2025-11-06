@@ -681,5 +681,6 @@ There is only one performance threshold set for the EC part, which is 120% of th
 Please submit your work using Gradescope. If you are working with a partner please remember to tag your partner on Gradescope.
 
 1. **Please submit your writeup as the file `writeup.pdf`.**
-2. **Please submit the file `kernels.py` containing your transpose kernel from part 1.**
-3. **Please submit the file `conv2d.py` containing your fused Conv2D kernel from part 2.**
+2. **Please run `sh create_submission.sh` to generate a `asst4.tar.gz` to submit to gradescope.** If the script errors saying 'Permission denied', you should run chmod +x create\_submission.sh and then try rerunning the script. Please also double check that the generated `tar.gz` includes:
+  * the file `kernels.py` containing your transpose kernel from part 1.
+  * the file `conv2d.py` containing your fused Conv2D kernel from part 2.
