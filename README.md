@@ -612,7 +612,10 @@ To check the correctness and performance of your implementation of Conv2D kernel
 The test harness will run correctness tests first, and run performance checks next. A full-credit solution must achieve performance within 120% of the reference kernel while maintaining correctness. It will invoke your kernel with input tensors having data types float32 and float16, with the performance requirements for float16 being more strict. Make sure you write your kernels keeping this in mind!
 
 #### Writeup and Profiling
-Students are required to submit a write up briefly describing their implementations. Also describe how you went about optimizing your implementation. Make sure to profile your implementation, and report the achieved MFU (Model FLOPs Utilization), with both `float16` and `float32` data types. You can so by running `neuron-profile view -n [your_profile_name].neff -s [your_profile_name].ntff`. Run the test harness with the `--profile <profile_name>` flag to capture a trace.
+Students are required to submit a write up briefly describing their implementations. Also describe how you went about optimizing your implementation. Make sure to profile your implementation, and report the achieved MFU (Model FLOPs Utilization), with both `float16` and `float32` data types. You can do so by running the test harness with the `--profile <profile_name>` flag to capture a trace, and then running
+```
+neuron-profile view -n [profile_name].neff -s [profile_name].ntff
+```
 
 > [!TIP]
 > When you open the profiler, you might see some warnings about missing benchmarking parameters. The only parameter you need to submit here is the MFU value, which is still available by mousing over the "Cumulative Utilization" line in the Estimated MFU section of the GUI, as seen below. (Make sure to take the MFU at the very end.)
@@ -639,19 +642,17 @@ Students are required to submit a write up briefly describing their implementati
 
 
 ## Extra Credit
-Run neuron-profile again on smaller images. Is there a difference in MFU between smaller and larger images? If so, how would you optimize your fused convolution layer for smaller images? Consider the maximum dimensions of PSUM/matmuls and how the dimensions of each tile are mapped onto the chip.
+Run `neuron-profile` again on smaller images. Is there a difference in MFU between smaller and larger images? If so, how would you optimize your fused convolution layer for smaller images? (It might help to know that `nisa.nc_matmul` can accept a >2D tensor as the `moving` argument, as long as the hardware constraints of PSUM are respected.)
 
 Up to five points of extra credit will be awarded for solutions that meet the performance goal for smaller images (a stricter target). Your write-up must clearly explain your approach and the steps you took to optimize your solution.
 
-It’s possible that your current solution already meets this requirement without the hint -- if that's the case, great job! Please still make sure to thoroughly discuss your approach.
-
 ## Grading Guidelines
 
-For the correctness test, we use two types of images. The first type is a small image with dimensions of 32×16. The second type is a large image with dimensions of 224×224, which exceeds the capacity of the SBUF and cannot fit within it all at once.
+For the correctness test, we use two types of images. The first type is a small image with dimensions of 32×16. The second type is a large image with dimensions of 224×224, which exceeds the capacity of the SBUF and cannot fit within it all at once. Your code must pass all correctness tests in order to earn performance points.
 
-For the performance test, we evaluate the performance under different configurations: with and without maxpool, and using float16 versus float32 precision. We will compare the performance of your program with the reference solution.
+For the performance test, we evaluate your kernel's performance against the reference kernel under different configurations: with and without maxpool, using float16 and float32 precision.
 
-As an intermediate goal, we include latencies for an unoptimized version of the reference kernel. You will be granted 90% of the performance points if your p99 latency is within 120% of the unoptimized reference latency. You will be granted full performance points if it is within 120% of the optimized reference latency.
+As an intermediate goal, we include relaxed latencies from an unoptimized version of the reference kernel. You will be granted 90% of the performance points if your p99 latency is within 120% of the relaxed latency. You will be granted full performance points if it is within 120% of the optimized reference latency.
 
 There is only one performance threshold set for the EC part, which is 120% of the reference latency.
 
@@ -680,4 +681,5 @@ There is only one performance threshold set for the EC part, which is 120% of th
 Please submit your work using Gradescope. If you are working with a partner please remember to tag your partner on Gradescope.
 
 1. **Please submit your writeup as the file `writeup.pdf`.**
-2. **Please submit `conv2d.py` from part 2.**
+2. **Please submit the file `kernels.py` containing your transpose kernel from part 1.**
+3. **Please submit the file `conv2d.py` containing your fused Conv2D kernel from part 2.**
