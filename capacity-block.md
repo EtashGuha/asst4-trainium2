@@ -54,4 +54,6 @@ To avoid creating a new instance every time your capacity block ends, you can [e
 </p>
 
 3. Select your desired duration and click __Find Capacity Block Extension__. After confirming the detials, click the __Extend__ button at the bottom right.
-![alt text](image-1.png)
+<p align="center">
+  <img src="handout/extend-summary.png" alt="Extend Capacity Block Summary" width="80%">
+</p>
