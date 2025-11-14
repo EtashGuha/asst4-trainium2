@@ -59,16 +59,10 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
         tile_h_base = (tile_h_base // pool_size) * pool_size
         if tile_h_base == 0:
             tile_h_base = pool_size
-    tile_w_base = min(out_width, max(1, MOVING_TILE // tile_h_base))
-    if tile_w_base % pool_size != 0:
-        tile_w_base = (tile_w_base // pool_size) * pool_size
-        if tile_w_base == 0:
-            tile_w_base = pool_size
 
+    tile_h_base = 512 // out_width
     full_h_tiles = out_height // tile_h_base
     h_remainder = out_height % tile_h_base
-    full_w_tiles = out_width // tile_w_base
-    w_remainder = out_width % tile_w_base
 
     num_oc_tiles = out_channels // PARTITION
     num_ic_tiles = in_channels // PARTITION
@@ -96,7 +90,7 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
         for ic_tile in nl.affine_range(num_ic_tiles):
             ic_start = ic_tile * PARTITION
 
-            x_cols = nl.ndarray((PARTITION, tile_spatial), dtype=X.dtype, buffer=nl.sbuf)
+            x_cols = nl.ndarray((PARTITION, tile_sgit patial), dtype=X.dtype, buffer=nl.sbuf)
             patch_tile = nl.ndarray(
                 (PARTITION, tile_h, tile_w), dtype=X.dtype, buffer=nl.sbuf
             )
@@ -244,56 +238,30 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
 
             for oh_tile in nl.affine_range(full_h_tiles):
                 oh_start = oh_tile * tile_h_base
-                for ow_tile in nl.affine_range(full_w_tiles):
-                    compute_tile(
-                        batch_idx,
-                        oc_tile,
-                        oc_start,
-                        oh_start,
-                        ow_tile * tile_w_base,
-                        tile_h_base,
-                        tile_w_base,
-                        bias_vec,
-                        W_oc_tile,
-                    )
-                if w_remainder > 0:
-                    compute_tile(
-                        batch_idx,
-                        oc_tile,
-                        oc_start,
-                        oh_start,
-                        full_w_tiles * tile_w_base,
-                        tile_h_base,
-                        w_remainder,
-                        bias_vec,
-                        W_oc_tile,
-                    )
+                compute_tile(
+                    batch_idx,
+                    oc_tile,
+                    oc_start,
+                    oh_start,
+                    0, 
+                    tile_h_base,
+                    out_width,  
+                    bias_vec,
+                    W_oc_tile,
+                )
 
             if h_remainder > 0:
                 oh_start = full_h_tiles * tile_h_base
-                for ow_tile in nl.affine_range(full_w_tiles):
-                    compute_tile(
-                        batch_idx,
-                        oc_tile,
-                        oc_start,
-                        oh_start,
-                        ow_tile * tile_w_base,
-                        h_remainder,
-                        tile_w_base,
-                        bias_vec,
-                        W_oc_tile,
-                    )
-                if w_remainder > 0:
-                    compute_tile(
-                        batch_idx,
-                        oc_tile,
-                        oc_start,
-                        oh_start,
-                        full_w_tiles * tile_w_base,
-                        h_remainder,
-                        w_remainder,
-                        bias_vec,
-                        W_oc_tile,
-                    )
+                compute_tile(
+                    batch_idx,
+                    oc_tile,
+                    oc_start,
+                    oh_start,
+                    0, 
+                    h_remainder,
+                    out_width,  
+                    bias_vec,
+                    W_oc_tile,
+                )
 
     return X_out
