@@ -218,14 +218,13 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
         )
 
     for batch_idx in nl.affine_range(batch_size):
-        for oc_idx in nl.affine_range(out_channels // PARTITION_SIZE):
-            # Load ALL weights for this output channel ONCE
-            w_all = nl.ndarray((PARTITION_SIZE, in_channels, filter_height, filter_width), dtype=W.dtype, buffer=nl.sbuf)
-            nisa.dma_copy(src=W[oc_idx * PARTITION_SIZE: (oc_idx + 1) * PARTITION_SIZE, :, :, :], dst=w_all)
+        for oc_tile in nl.affine_range(num_oc_tiles):
+            oc_start = oc_tile * PARTITION
 
-            # Load bias once per output channel tile
-            bias_tile = nl.ndarray((PARTITION_SIZE, 1), dtype=bias.dtype, buffer=nl.sbuf)
-            nisa.dma_copy(src=bias[oc_idx * PARTITION_SIZE: (oc_idx + 1) * PARTITION_SIZE], dst=bias_tile[:, 0])
+            bias_vec = nl.ndarray((PARTITION, 1), dtype=bias.dtype, buffer=nl.sbuf)
+            nisa.dma_copy(
+                dst=bias_vec[:, 0:1], src=bias[oc_start : oc_start + PARTITION]
+            )
 
             bias_vec = nl.ndarray((PARTITION, 1), dtype=bias.dtype, buffer=nl.sbuf)
             nisa.dma_copy(
