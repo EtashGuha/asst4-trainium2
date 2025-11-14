@@ -138,7 +138,16 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
         buffer=nl.hbm,
     )
 
-    def compute_tile(batch_idx, oc_tile, oc_start, oh_start, ow_start, tile_h, tile_w, bias_vec):
+    def compute_tile(
+        batch_idx,
+        oc_tile,
+        oc_start,
+        oh_start,
+        ow_start,
+        tile_h,
+        tile_w,
+        bias_vec,
+    ):
         tile_spatial = tile_h * tile_w
         psum_tile = nl.zeros((PARTITION, tile_spatial), dtype=nl.float32, buffer=nl.psum)
 
@@ -148,6 +157,21 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
             x_cols = nl.ndarray((PARTITION, tile_spatial), dtype=X.dtype, buffer=nl.sbuf)
             patch_tile = nl.ndarray(
                 (PARTITION, tile_h, tile_w), dtype=X.dtype, buffer=nl.sbuf
+            )
+
+            weight_block = nl.ndarray(
+                (PARTITION, PARTITION, filter_height, filter_width),
+                dtype=W.dtype,
+                buffer=nl.sbuf,
+            )
+            nisa.dma_copy(
+                dst=weight_block,
+                src=W[
+                    oc_start : oc_start + PARTITION,
+                    ic_start : ic_start + PARTITION,
+                    :,
+                    :,
+                ],
             )
 
             for fh in range(filter_height):
@@ -169,19 +193,8 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                             src=patch_tile[:, rel_h, :],
                         )
 
-                    weight_tile = nl.ndarray(
-                        (PARTITION, PARTITION), dtype=W.dtype, buffer=nl.sbuf
-                    )
-                    nisa.dma_copy(
-                        dst=weight_tile,
-                        src=W[
-                            oc_start : oc_start + PARTITION,
-                            ic_start : ic_start + PARTITION,
-                            fh,
-                            fw,
-                        ],
-                    )
-                    weight_transposed = nisa.nc_transpose(weight_tile)
+                    weight_slice = weight_block[:, :, fh, fw]
+                    weight_transposed = nisa.nc_transpose(weight_slice)
                     weight_stationary = nisa.tensor_copy(
                         weight_transposed, engine=nisa.vector_engine
                     )
