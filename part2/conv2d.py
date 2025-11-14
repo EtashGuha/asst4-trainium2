@@ -174,23 +174,35 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                 ],
             )
 
+            # Load a larger patch that covers all filter positions (HBM -> SBUF once)
+            large_patch_h = tile_h + filter_height - 1
+            large_patch_w = tile_w + filter_width - 1
+            large_patch = nl.ndarray(
+                (PARTITION, large_patch_h, large_patch_w), dtype=X.dtype, buffer=nl.sbuf
+            )
+            nisa.dma_copy(
+                dst=large_patch,
+                src=X[
+                    batch_idx,
+                    ic_start : ic_start + PARTITION,
+                    oh_start : oh_start + large_patch_h,
+                    ow_start : ow_start + large_patch_w,
+                ],
+            )
+
             for fh in range(filter_height):
                 for fw in range(filter_width):
-                    nisa.dma_copy(
-                        dst=patch_tile,
-                        src=X[
-                            batch_idx,
-                            ic_start : ic_start + PARTITION,
-                            oh_start + fh : oh_start + fh + tile_h,
-                            ow_start + fw : ow_start + fw + tile_w,
-                        ],
+                    # Extract the specific patch for this filter position (SBUF -> SBUF)
+                    patch_tile[:, :, :] = nisa.tensor_copy(
+                        large_patch[:, fh : fh + tile_h, fw : fw + tile_w],
+                        engine=nisa.vector_engine
                     )
 
                     for rel_h in nl.affine_range(tile_h):
                         start = rel_h * tile_w
-                        nisa.dma_copy(
-                            dst=x_cols[:, start : start + tile_w],
-                            src=patch_tile[:, rel_h, :],
+                        x_cols[:, start : start + tile_w] = nisa.tensor_copy(
+                            patch_tile[:, rel_h, :],
+                            engine=nisa.vector_engine
                         )
 
                     weight_slice = weight_block[:, :, fh, fw]
