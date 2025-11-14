@@ -51,10 +51,9 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
     assert in_channels % nl.tile_size.pmax == 0
     assert out_channels % nl.tile_size.pmax == 0
 
-    PARTITION = nl.tile_size.pmax  # 128
-    MOVING_TILE = nl.tile_size.gemm_moving_fmax  # 512
+    PARTITION = nl.tile_size.pmax 
+    MOVING_TILE = nl.tile_size.gemm_moving_fmax  
 
-    # Choose tile sizes that keep tensor-engine tiles <= MOVING_TILE and pool-aligned.
     tile_h_base = min(out_height, 8)
     if tile_h_base % pool_size != 0:
         tile_h_base = (tile_h_base // pool_size) * pool_size
@@ -102,7 +101,6 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                 (PARTITION, tile_h, tile_w), dtype=X.dtype, buffer=nl.sbuf
             )
 
-            # Copy the weight block from W_oc_tile (SBUF -> SBUF using tensor_copy)
             weight_block = nl.ndarray(
                 (PARTITION, PARTITION, filter_height, filter_width),
                 dtype=W.dtype,
@@ -113,7 +111,6 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                 engine=nisa.vector_engine
             )
 
-            # Load a larger patch that covers all filter positions (HBM -> SBUF once)
             large_patch_h = tile_h + filter_height - 1
             large_patch_w = tile_w + filter_width - 1
             large_patch = nl.ndarray(
@@ -131,7 +128,6 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
 
             for fh in range(filter_height):
                 for fw in range(filter_width):
-                    # Extract the specific patch for this filter position (SBUF -> SBUF)
                     patch_tile[:, :, :] = nisa.tensor_copy(
                         large_patch[:, fh : fh + tile_h, fw : fw + tile_w],
                         engine=nisa.vector_engine
@@ -211,15 +207,12 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
             base_w = ow_start
 
         oc_start = oc_tile * PARTITION
-        # Reshape store_tile to 2D format and do a single DMA copy
         store_tile_2d = nl.ndarray((PARTITION, store_h, store_w), dtype=X.dtype, buffer=nl.sbuf)
         for rel_h in nl.affine_range(store_h):
             store_tile_2d[:, rel_h, :] = nisa.tensor_copy(
                 store_tile[:, rel_h * store_w : (rel_h + 1) * store_w],
                 engine=nisa.vector_engine
             )
-
-        # Single DMA copy for the entire tile
         nisa.dma_copy(
             dst=X_out[
                 batch_idx,
@@ -239,7 +232,6 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                 dst=bias_vec[:, 0:1], src=bias[oc_start : oc_start + PARTITION]
             )
 
-            # Load weights for this output channel tile once
             W_oc_tile = nl.ndarray(
                 (PARTITION, in_channels, filter_height, filter_width),
                 dtype=W.dtype,
