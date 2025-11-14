@@ -272,18 +272,24 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
             base_w = ow_start
 
         oc_start = oc_tile * PARTITION
+        # Reshape store_tile to 2D format and do a single DMA copy
+        store_tile_2d = nl.ndarray((PARTITION, store_h, store_w), dtype=X.dtype, buffer=nl.sbuf)
         for rel_h in nl.affine_range(store_h):
-            for rel_w in nl.affine_range(store_w):
-                tile_idx = rel_h * store_w + rel_w
-                nisa.dma_copy(
-                    dst=X_out[
-                        batch_idx,
-                        oc_start : oc_start + PARTITION,
-                        base_h + rel_h,
-                        base_w + rel_w,
-                    ],
-                    src=store_tile[:, tile_idx],
-                )
+            store_tile_2d[:, rel_h, :] = nisa.tensor_copy(
+                store_tile[:, rel_h * store_w : (rel_h + 1) * store_w],
+                engine=nisa.vector_engine
+            )
+
+        # Single DMA copy for the entire tile
+        nisa.dma_copy(
+            dst=X_out[
+                batch_idx,
+                oc_start : oc_start + PARTITION,
+                base_h : base_h + store_h,
+                base_w : base_w + store_w,
+            ],
+            src=store_tile_2d,
+        )
 
     for batch_idx in nl.affine_range(batch_size):
         for oc_tile in nl.affine_range(num_oc_tiles):
