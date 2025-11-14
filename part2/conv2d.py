@@ -183,6 +183,10 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
 
     for batch_idx in nl.affine_range(batch_size):
         for oc_idx in nl.affine_range(out_channels // PARTITION_SIZE):
+            # Load ALL weights for this output channel ONCE
+            w_all = nl.ndarray((PARTITION_SIZE, in_channels, filter_height, filter_width), dtype=W.dtype, buffer=nl.sbuf)
+            nisa.dma_copy(src=W[oc_idx * PARTITION_SIZE: (oc_idx + 1) * PARTITION_SIZE, :, :, :], dst=w_all)
+
             # Load bias once per output channel tile
             bias_tile = nl.ndarray((PARTITION_SIZE, 1), dtype=bias.dtype, buffer=nl.sbuf)
             nisa.dma_copy(src=bias[oc_idx * PARTITION_SIZE: (oc_idx + 1) * PARTITION_SIZE], dst=bias_tile[:, 0])
@@ -193,40 +197,53 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                 spatial_end = min(spatial_start + SPATIAL_PARTITION_SIZE, out_height * out_width)
                 spatial_size = spatial_end - spatial_start
 
-                # Initialize output tile with bias (broadcast across spatial dimension)
-                output_tile = nl.ndarray((PARTITION_SIZE, SPATIAL_PARTITION_SIZE), dtype=X.dtype, buffer=nl.sbuf)
-                for i in nl.affine_range(SPATIAL_PARTITION_SIZE):
-                    output_tile[:, i] = bias_tile[:, 0]
+                # Allocate PSUM accumulator for this spatial tile
+                output_psum = nl.zeros((PARTITION_SIZE, SPATIAL_PARTITION_SIZE), nl.float32, buffer=nl.psum)
 
-                # Accumulate contributions from all filter positions and input channels
-                for fh in range(filter_height):
-                    for fw in range(filter_width):
-                        for ic_idx in range(in_channels // PARTITION_SIZE):
-                            # Load weights once per (fh, fw, ic_idx) combination
-                            w_tile = nl.ndarray((PARTITION_SIZE, PARTITION_SIZE), dtype=W.dtype, buffer=nl.sbuf)
-                            nisa.dma_copy(src=W[oc_idx * PARTITION_SIZE: (oc_idx + 1) * PARTITION_SIZE, ic_idx * PARTITION_SIZE: (ic_idx + 1) * PARTITION_SIZE, fh, fw], dst=w_tile)
+                # Accumulate contributions from all input channels and filter positions
+                for ic_idx in range(in_channels // PARTITION_SIZE):
+                    # Load entire input plane for this ic_idx ONCE
+                    x_all = nl.ndarray((PARTITION_SIZE, input_height, input_width), dtype=X.dtype, buffer=nl.sbuf)
+                    nisa.dma_copy(src=X[batch_idx, ic_idx * PARTITION_SIZE: (ic_idx + 1) * PARTITION_SIZE, :, :], dst=x_all)
 
-                            # Transpose weights: nc_matmul computes stationary.T @ moving
+                    # Extract weights for this ic_idx from pre-loaded buffer (SBUF -> SBUF)
+                    w_ic = nl.ndarray((PARTITION_SIZE, PARTITION_SIZE, filter_height, filter_width), dtype=W.dtype, buffer=nl.sbuf)
+                    w_ic[:, :, :, :] = w_all[:, ic_idx * PARTITION_SIZE: (ic_idx + 1) * PARTITION_SIZE, :, :]
+
+                    for fh in range(filter_height):
+                        for fw in range(filter_width):
+                            # Extract weight tile from SBUF (no DMA)
+                            w_tile = w_ic[:, :, fh, fw]
                             w_transposed = nl.copy(nisa.nc_transpose(w_tile), dtype=W.dtype)
 
-                            # Load the entire plane for this filter position
+                            # Extract the plane for this filter position from pre-loaded X (SBUF -> SBUF)
                             x_plane = nl.ndarray((PARTITION_SIZE, out_height, out_width), dtype=X.dtype, buffer=nl.sbuf)
-                            nisa.dma_copy(src=X[batch_idx, ic_idx * PARTITION_SIZE: (ic_idx + 1) * PARTITION_SIZE, fh:fh + out_height, fw:fw + out_width], dst=x_plane)
+                            x_plane[:, :, :] = x_all[:, fh:fh + out_height, fw:fw + out_width]
 
-                            # Flatten and extract our spatial tile directly
+                            # Flatten and extract spatial tile
                             x_plane_flat = x_plane.reshape((PARTITION_SIZE, out_height * out_width))
-                            x_tile = x_plane_flat[:, spatial_start:spatial_start + spatial_size]
+                            x_tile = nl.ndarray((PARTITION_SIZE, SPATIAL_PARTITION_SIZE), dtype=X.dtype, buffer=nl.sbuf)
+                            for i in nl.affine_range(SPATIAL_PARTITION_SIZE):
+                                if i < spatial_size:
+                                    x_tile[:, i] = x_plane_flat[:, spatial_start + i]
 
-                            out = nl.copy(nisa.nc_matmul(w_transposed, x_tile), dtype=X.dtype)
-                            # Accumulate only into the valid portion
-                            output_tile[:, :spatial_size] = nisa.tensor_tensor(output_tile[:, :spatial_size], out, nl.add)
+                            # Accumulate in PSUM - NO intermediate conversion
+                            output_psum += nisa.nc_matmul(w_transposed, x_tile)
 
-                # Write back the complete output tile to HBM
+                # Convert from PSUM to SBUF once at the end
+                output_sbuf = nl.copy(output_psum, dtype=X.dtype)
+
+                # Add bias
+                for i in nl.affine_range(SPATIAL_PARTITION_SIZE):
+                    if i < spatial_size:
+                        output_sbuf[:, i] = nisa.tensor_tensor(output_sbuf[:, i], bias_tile[:, 0], nl.add)
+
+                # Write back element-by-element
                 for i in nl.affine_range(SPATIAL_PARTITION_SIZE):
                     if i < spatial_size:
                         global_i = spatial_start + i
                         oh = global_i // out_width
                         ow = global_i % out_width
-                        nisa.dma_copy(src=output_tile[:, i], dst=X_out[batch_idx, oc_idx * PARTITION_SIZE: (oc_idx + 1) * PARTITION_SIZE, oh, ow])
+                        nisa.dma_copy(src=output_sbuf[:, i], dst=X_out[batch_idx, oc_idx * PARTITION_SIZE: (oc_idx + 1) * PARTITION_SIZE, oh, ow])
 
     return X_out
