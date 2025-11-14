@@ -227,8 +227,9 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
             )
             for rel_h in nl.affine_range(tile_h):
                 start = rel_h * tile_w
-                nisa.dma_copy(
-                    dst=conv_hw[:, rel_h, :], src=conv_tile[:, start : start + tile_w]
+                conv_hw[:, rel_h, :] = nisa.tensor_copy(
+                    conv_tile[:, start : start + tile_w],
+                    engine=nisa.vector_engine
                 )
             pooled_hw = nl.ndarray(
                 (PARTITION, pooled_h, pooled_w), dtype=X.dtype, buffer=nl.sbuf
@@ -243,8 +244,9 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                     patch_max = nisa.tensor_reduce(
                         nl.max, patch, axis=(1, 2), keepdims=True
                     )
-                    nisa.dma_copy(
-                        dst=pooled_hw[:, ph : ph + 1, pw : pw + 1], src=patch_max
+                    pooled_hw[:, ph : ph + 1, pw : pw + 1] = nisa.tensor_copy(
+                        patch_max,
+                        engine=nisa.vector_engine
                     )
 
             pooled_tile = nl.ndarray(
@@ -252,9 +254,9 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
             )
             for rel_h in nl.affine_range(pooled_h):
                 start = rel_h * pooled_w
-                nisa.dma_copy(
-                    dst=pooled_tile[:, start : start + pooled_w],
-                    src=pooled_hw[:, rel_h, :],
+                pooled_tile[:, start : start + pooled_w] = nisa.tensor_copy(
+                    pooled_hw[:, rel_h, :],
+                    engine=nisa.vector_engine
                 )
 
             store_tile = pooled_tile
