@@ -90,7 +90,7 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
         for ic_tile in nl.affine_range(num_ic_tiles):
             ic_start = ic_tile * PARTITION
 
-            x_cols = nl.ndarray((PARTITION, tile_sgit patial), dtype=X.dtype, buffer=nl.sbuf)
+            x_cols = nl.ndarray((PARTITION, tile_spatial), dtype=X.dtype, buffer=nl.sbuf)
             patch_tile = nl.ndarray(
                 (PARTITION, tile_h, tile_w), dtype=X.dtype, buffer=nl.sbuf
             )
@@ -236,32 +236,33 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                 src=W[oc_start : oc_start + PARTITION, :, :, :],
             )
 
-            for oh_tile in nl.affine_range(full_h_tiles):
-                oh_start = oh_tile * tile_h_base
-                compute_tile(
-                    batch_idx,
-                    oc_tile,
-                    oc_start,
-                    oh_start,
-                    0, 
-                    tile_h_base,
-                    out_width,  
-                    bias_vec,
-                    W_oc_tile,
-                )
-
-            if h_remainder > 0:
-                oh_start = full_h_tiles * tile_h_base
-                compute_tile(
-                    batch_idx,
-                    oc_tile,
-                    oc_start,
-                    oh_start,
-                    0, 
-                    h_remainder,
-                    out_width,  
-                    bias_vec,
-                    W_oc_tile,
-                )
+            for oh_tile in nl.affine_range(full_h_tiles + 1):
+                if oh_tile == full_h_tiles and h_remainder > 0:
+                    oh_start = full_h_tiles * tile_h_base
+                    compute_tile(
+                        batch_idx,
+                        oc_tile,
+                        oc_start,
+                        oh_start,
+                        0, 
+                        h_remainder,
+                        out_width,  
+                        bias_vec,
+                        W_oc_tile,
+                    )
+                elif oh_tile < full_h_tiles:
+                    oh_start = oh_tile * tile_h_base
+                    compute_tile(
+                        batch_idx,
+                        oc_tile,
+                        oc_start,
+                        oh_start,
+                        0, 
+                        tile_h_base,
+                        out_width,  
+                        bias_vec,
+                        W_oc_tile,
+                    )
+                
 
     return X_out
